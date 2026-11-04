@@ -83,6 +83,13 @@ body{
 .count{font-variant-numeric:tabular-nums;color:var(--ink-soft);font-size:1.1rem}
 .count b{color:var(--ink)}
 
+
+.snd{
+  font-family:var(--f-body);font-size:.95rem;color:var(--ink);background:var(--sheet);cursor:pointer;
+  border:2px solid var(--ink);padding:.15em .7em;border-radius:255px 18px 225px 18px / 18px 225px 18px 255px;
+}
+.snd[aria-pressed="true"]{background:var(--mark)}
+.snd:focus-visible{outline:3px dashed var(--moon);outline-offset:3px}
 /* --- illustration motion --- */
 .plate .bob{animation:bob 2.8s ease-in-out infinite}
 @keyframes bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-7px)}}
@@ -163,7 +170,7 @@ body{
 </svg>
 
 <div class="book">
-  <header class="mast"><b>달이 나를 따라오는 건</b><a href="../../" style="color:inherit">인터스티셜 아카이브 · AI 창작방</a></header>
+  <header class="mast"><b>달이 나를 따라오는 건</b><a href="../../" style="color:inherit">인터스티셜 아카이브 · AI 창작방</a><button id="snd" class="snd" type="button" aria-pressed="false">♪ 소리 켜기</button></header>
   <main id="stage"></main>
   <nav class="ctrl" aria-label="책장 넘기기">
     <button id="prev" type="button">← 앞장</button>
@@ -565,6 +572,7 @@ function show(i,anim=true){
   prev.disabled=i===0;
   next.textContent=i===N-1?'처음으로 ↺':'다음 장 →';
   const h='#p'+(i+1);if(location.hash!==h)history.replaceState(null,'',h);
+  if(window.__snd)window.__snd.page(i,anim);
 }
 function fromHash(){const m=/^#p(\d+)$/.exec(location.hash);return m?parseInt(m[1],10)-1:0;}
 prev.addEventListener('click',()=>show(cur-1));
@@ -577,6 +585,109 @@ document.addEventListener('keydown',e=>{
 let sx=null;
 stage.addEventListener('pointerdown',e=>{sx=e.clientX;});
 stage.addEventListener('pointerup',e=>{if(sx===null)return;const dx=e.clientX-sx;sx=null;if(Math.abs(dx)>50)show(cur+(dx<0?1:-1));});
+
+/* ---------- sound: an original music-box lullaby and small effects, all synthesized, off until the reader turns it on ---------- */
+const Sound=(()=>{
+  let ctx=null,master,musicBus,sfxBus,on=false,lookTimer=null,nextT=0,idx=0,sceneTimers=[];
+  const BEAT=60/76;
+  // melody: [semitones from C5 (null = rest), beats]; C major pentatonic, written for this book
+  const MEL=[[4,1],[7,1],[9,1],[7,1],[4,1],[2,1],[0,2],[2,1],[4,1],[7,1],[9,.5],[7,.5],[4,3],[null,1],
+             [9,1],[12,1],[9,1],[7,1],[4,1],[7,1],[2,2],[0,1],[2,1],[4,1],[7,1],[0,3],[null,1]];
+  const ROOTS=[-12,-15,-19,-17,-15,-19,-17,-12];
+  const hz=s=>523.25*Math.pow(2,s/12);
+  function ensure(){
+    if(ctx)return true;
+    const AC=window.AudioContext||window.webkitAudioContext; if(!AC)return false;
+    ctx=new AC(); master=ctx.createGain(); master.gain.value=.9; master.connect(ctx.destination);
+    musicBus=ctx.createGain(); musicBus.gain.value=.14; musicBus.connect(master);
+    sfxBus=ctx.createGain(); sfxBus.gain.value=.45; sfxBus.connect(master);
+    return true;
+  }
+  function bell(t,f,dur,vol,dest){
+    const g=ctx.createGain(),o=ctx.createOscillator(),o2=ctx.createOscillator(),g2=ctx.createGain();
+    o.type='sine';o.frequency.value=f;o2.type='sine';o2.frequency.value=f*2.01;g2.gain.value=.22;
+    o.connect(g);o2.connect(g2);g2.connect(g);g.connect(dest);
+    g.gain.setValueAtTime(.0001,t);g.gain.exponentialRampToValueAtTime(vol,t+.012);g.gain.exponentialRampToValueAtTime(.0001,t+dur);
+    o.start(t);o2.start(t);o.stop(t+dur+.05);o2.stop(t+dur+.05);
+  }
+  function pad(t,f,dur,vol){
+    const g=ctx.createGain(),o=ctx.createOscillator();o.type='triangle';o.frequency.value=f;o.connect(g);g.connect(musicBus);
+    g.gain.setValueAtTime(.0001,t);g.gain.linearRampToValueAtTime(vol,t+.25);g.gain.exponentialRampToValueAtTime(.0001,t+dur);
+    o.start(t);o.stop(t+dur+.05);
+  }
+  // lay out one loop of the tune as absolute beat positions
+  const NOTES=[];{let b=0;for(const [s,d] of MEL){if(s!==null)NOTES.push([b,s,d]);b+=d;}}
+  const LOOP=32;
+  let loopStart=0;
+  function scheduler(){
+    while(nextT<ctx.currentTime+.4){
+      const [b,s,d]=NOTES[idx];
+      const t=loopStart+b*BEAT;
+      bell(t,hz(s),Math.max(.9,d*BEAT*1.6),.5,musicBus);
+      if(b%4===0){const r=ROOTS[(b/4)|0];pad(t,hz(r),BEAT*3.6,.18);pad(t+BEAT*2,hz(r+7),BEAT*1.8,.1);}
+      idx++;
+      if(idx>=NOTES.length){idx=0;loopStart+=LOOP*BEAT;}
+      nextT=loopStart+NOTES[idx][0]*BEAT;
+    }
+  }
+  function startMusic(){idx=0;loopStart=ctx.currentTime+.15;nextT=loopStart;clearInterval(lookTimer);lookTimer=setInterval(scheduler,100);scheduler();}
+  function stopMusic(){clearInterval(lookTimer);lookTimer=null;}
+  function noise(dur){const b=ctx.createBuffer(1,Math.max(1,ctx.sampleRate*dur|0),ctx.sampleRate),d=b.getChannelData(0);for(let i=0;i<d.length;i++)d[i]=Math.random()*2-1;const s=ctx.createBufferSource();s.buffer=b;return s;}
+  const FX={
+    swish(){const t=ctx.currentTime,n=noise(.35),f=ctx.createBiquadFilter(),g=ctx.createGain();f.type='bandpass';f.Q.value=1.2;
+      f.frequency.setValueAtTime(700,t);f.frequency.exponentialRampToValueAtTime(2600,t+.28);
+      g.gain.setValueAtTime(.0001,t);g.gain.exponentialRampToValueAtTime(.35,t+.06);g.gain.exponentialRampToValueAtTime(.0001,t+.32);
+      n.connect(f);f.connect(g);g.connect(sfxBus);n.start(t);n.stop(t+.36);},
+    thump(){const t=ctx.currentTime,o=ctx.createOscillator(),f=ctx.createBiquadFilter(),g=ctx.createGain();o.type='sine';f.type='lowpass';f.frequency.value=900;
+      o.frequency.setValueAtTime(330,t);o.frequency.exponentialRampToValueAtTime(230,t+.12);
+      g.gain.setValueAtTime(.0001,t);g.gain.exponentialRampToValueAtTime(.32,t+.012);g.gain.exponentialRampToValueAtTime(.0001,t+.2);
+      o.connect(f);f.connect(g);g.connect(sfxBus);o.start(t);o.stop(t+.22);},
+    poof(){const t=ctx.currentTime,o=ctx.createOscillator(),g=ctx.createGain();o.type='sine';
+      o.frequency.setValueAtTime(520,t);o.frequency.exponentialRampToValueAtTime(880,t+.14);
+      g.gain.setValueAtTime(.0001,t);g.gain.exponentialRampToValueAtTime(.2,t+.03);g.gain.exponentialRampToValueAtTime(.0001,t+.22);
+      o.connect(g);g.connect(sfxBus);o.start(t);o.stop(t+.24);},
+    fold(){const t=ctx.currentTime;for(const k of [0,.07]){const n=noise(.06),f=ctx.createBiquadFilter(),g=ctx.createGain();f.type='highpass';f.frequency.value=2800;
+      g.gain.setValueAtTime(.3,t+k);g.gain.exponentialRampToValueAtTime(.0001,t+k+.06);n.connect(f);f.connect(g);g.connect(sfxBus);n.start(t+k);n.stop(t+k+.07);}},
+    chime(){const t=ctx.currentTime;bell(t,hz(12),1.4,.35,sfxBus);bell(t+.12,hz(16),1.4,.25,sfxBus);},
+    boing(){const t=ctx.currentTime,o=ctx.createOscillator(),g=ctx.createGain();o.type='triangle';
+      o.frequency.setValueAtTime(140,t);o.frequency.exponentialRampToValueAtTime(560,t+.16);o.frequency.exponentialRampToValueAtTime(420,t+.35);
+      g.gain.setValueAtTime(.0001,t);g.gain.exponentialRampToValueAtTime(.55,t+.02);g.gain.exponentialRampToValueAtTime(.0001,t+.4);
+      o.connect(g);g.connect(sfxBus);o.start(t);o.stop(t+.42);},
+    end(){const t=ctx.currentTime;[0,4,7,12].forEach((s,k)=>bell(t+k*.18,hz(s),1.6,.3,sfxBus));}
+  };
+  // effects timed to each page's animation: [seconds into the loop, effect], loop length in seconds (0 = once)
+  const SCENES={4:[6,[[3.0,'thump'],[4.62,'poof']]],5:[6,[[3.0,'thump'],[4.62,'poof']]],9:[7,[[1.6,'fold'],[2.5,'fold'],[6.0,'chime']]],
+                10:[4,[[1.8,'boing']]],11:[5,[[1.5,'thump']]]};
+  const reduce=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let cur=0;
+  function clearScene(){sceneTimers.forEach(clearTimeout);sceneTimers=[];}
+  function runScene(i){
+    clearScene();if(!on||reduce||!SCENES[i])return;
+    const [period,evs]=SCENES[i];
+    const cycle=()=>{evs.forEach(([d,name])=>sceneTimers.push(setTimeout(()=>{if(on)FX[name]();},d*1000)));
+      if(period)sceneTimers.push(setTimeout(cycle,period*1000));};
+    cycle();
+  }
+  function restartAnimations(){
+    const page=document.querySelector('.page:not([hidden]) .plate svg');if(!page)return;
+    page.style.display='none';void page.getBoundingClientRect();page.style.display='';
+  }
+  const btn=document.getElementById('snd');
+  function render(){btn.setAttribute('aria-pressed',String(on));btn.textContent=on?'♪ 소리 끄기':'♪ 소리 켜기';}
+  btn.addEventListener('click',()=>{
+    if(!on){if(!ensure())return;on=true;ctx.resume&&ctx.resume();startMusic();restartAnimations();runScene(cur);}
+    else{on=false;stopMusic();clearScene();ctx&&ctx.suspend&&ctx.suspend();}
+    render();
+  });
+  document.addEventListener('visibilitychange',()=>{
+    if(!ctx||!on)return;
+    if(document.hidden){ctx.suspend();stopMusic();clearScene();}
+    else{ctx.resume();startMusic();restartAnimations();runScene(cur);}
+  });
+  render();
+  return {page(i,turned){cur=i;if(on&&turned&&!reduce)FX.swish();runScene(i);}};
+})();
+window.__snd=Sound;
 show(fromHash(),false);
 
 /* line boil: the drawing redraws itself a few times a second */
